@@ -41,15 +41,15 @@ struct erofs_bufmgr *erofs_buffer_init(struct erofs_sb_info *sbi,
 	bufmgr->blkh.blkaddr = NULL_ADDR;
 	bufmgr->last_mapped_block = &bufmgr->blkh;
 
-	for (i = 0; i < ARRAY_SIZE(bufmgr->watermeter); i++)
-		for (j = 0; j < (1 << sbi->blkszbits); j++)
-			init_list_head(&bufmgr->watermeter[i][j]);
+	for (i = 0; i < ARRAY_SIZE(bufmgr->mapped_buckets); i++)
+		for (j = 0; j < ARRAY_SIZE(bufmgr->mapped_buckets[0]); j++)
+			init_list_head(&bufmgr->mapped_buckets[i][j]);
 	bufmgr->tail_blkaddr = startblk;
 	bufmgr->sbi = sbi;
 	return bufmgr;
 }
 
-static void erofs_update_bwatermeter(struct erofs_buffer_block *bb)
+static void erofs_bupdate_mapped(struct erofs_buffer_block *bb)
 {
 	struct erofs_bufmgr *bmgr = bb->buffers.fsprivate;
 	struct erofs_sb_info *sbi = bmgr->sbi;
@@ -58,10 +58,10 @@ static void erofs_update_bwatermeter(struct erofs_buffer_block *bb)
 	if (bb->blkaddr == NULL_ADDR)
 		return;
 
-	bkt = bmgr->watermeter[bb->type] +
+	bkt = bmgr->mapped_buckets[bb->type] +
 		(bb->buffers.off & (erofs_blksiz(sbi) - 1));
-	list_del(&bb->sibling);
-	list_add_tail(&bb->sibling, bkt);
+	list_del(&bb->mapped_list);
+	list_add_tail(&bb->mapped_list, bkt);
 }
 
 /* return occupied bytes in specific buffer block if succeed */
@@ -116,7 +116,7 @@ static int __erofs_battach(struct erofs_buffer_block *bb,
 		/* need to update the tail_blkaddr */
 		if (tailupdate)
 			bmgr->tail_blkaddr = blkaddr + bb->buffers.nblocks;
-		erofs_update_bwatermeter(bb);
+		erofs_bupdate_mapped(bb);
 	}
 	return ((alignedoffset + incr + blkmask) & blkmask) + 1;
 }
@@ -165,11 +165,12 @@ static int erofs_bfind_for_attach(struct erofs_bufmgr *bmgr,
 		used_before = rounddown(blksiz - (size + inline_ext), alignsize);
 
 	for (; used_before; --used_before) {
-		struct list_head *bt = bmgr->watermeter[type] + used_before;
+		struct list_head *bt = bmgr->mapped_buckets[type] + used_before;
 
 		if (list_empty(bt))
 			continue;
-		cur = list_first_entry(bt, struct erofs_buffer_block, sibling);
+		cur = list_first_entry(bt, struct erofs_buffer_block,
+				       mapped_list);
 
 		/* last mapped block can be expended, don't handle it here */
 		if (list_next_entry(cur, list)->blkaddr == NULL_ADDR) {
@@ -278,7 +279,7 @@ struct erofs_buffer_head *erofs_balloc(struct erofs_bufmgr *bmgr,
 				 &bmgr->last_mapped_block->list);
 		else
 			list_add_tail(&bb->list, &bmgr->blkh.list);
-		init_list_head(&bb->sibling);
+		init_list_head(&bb->mapped_list);
 
 		bh = malloc(sizeof(struct erofs_buffer_head));
 		if (!bh) {
@@ -342,7 +343,7 @@ static void __erofs_mapbh(struct erofs_buffer_block *bb)
 			}
 		}
 		bmgr->last_mapped_block = bb;
-		erofs_update_bwatermeter(bb);
+		erofs_bupdate_mapped(bb);
 	}
 
 	blkaddr = bb->blkaddr + bb->buffers.nblocks;
@@ -381,7 +382,7 @@ static void erofs_bfree(struct erofs_buffer_block *bb)
 	if (bb == bmgr->last_mapped_block)
 		bmgr->last_mapped_block = list_prev_entry(bb, list);
 
-	list_del(&bb->sibling);
+	list_del(&bb->mapped_list);
 	list_del(&bb->list);
 	free(bb);
 }
